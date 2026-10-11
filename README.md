@@ -1,9 +1,9 @@
 # RDR2 60fps Autopatch (PS5)
 
-60 FPS for Red Dead Redemption 2 (PS4, `CUSA03041` v1.32) on a jailbroken PS5,
-without installing any modded PKG and without touching the disk: the patch is
-applied in memory each time the game boots. Nothing persists, so shutting the
-console down leaves it clean.
+60 FPS for Red Dead Redemption 2 (PS4, `CUSA03041` — versions 1.00, 1.29 and
+1.32) on a jailbroken PS5, without installing any modded PKG and without touching
+the disk: the patch is applied in memory each time the game boots. Nothing
+persists, so shutting the console down leaves it clean.
 
 Made by **KurohaXR**.
 
@@ -78,15 +78,28 @@ what writes what.
 
 ## The fix
 
-Don't install the mod. Play on the **clean** update and unlock the framerate live:
+Don't install the mod. Play on a **clean** install and unlock the framerate live:
 
-- Patch: 1.32 *Unlock FPS* by **Jao** (`eboot+0x05853029 = 31 f6 90`, 3 bytes),
-  from [`illusionyy/PS-Game-Patch`](https://github.com/illusionyy/PS-Game-Patch)
-  (file `patches/xml/RedDeadRedemption2-Orbis.xml` upstream — not vendored here).
-- Applier: `autopatch60-oneshot.elf`, which waits for RDR2's eboot, **verifies
-  the original bytes** (`0f 44 f0`), writes the patch, re-verifies, notifies
-  (`RDR2 60fps ON`) and **exits**. Nothing resident, no traffic after patching.
-  If anything doesn't match, it writes nothing.
+| version | Address (`eboot+X`) | original | patch   |
+|---------|---------------------|----------|---------|
+| 01.00   | `0x04A8EE1F`        | `0f 44 f0` | `31 f6 90` |
+| 01.29   | `0x0578AB59`        | `0f 44 f0` | `31 f6 90` |
+| 01.32   | `0x05853029`        | `0f 44 f0` | `31 f6 90` |
+
+The 1.32 *Unlock FPS* patch is by **Jao**, from
+[`illusionyy/PS-Game-Patch`](https://github.com/illusionyy/PS-Game-Patch)
+(file `patches/xml/RedDeadRedemption2-Orbis.xml` upstream — not vendored here).
+The 1.00 and 1.29 rows use the same site, verified against the real eboots of
+those versions (on 1.29, illusion's published address points at the `test` two
+bytes before the target, a 5-byte overwrite; this tool overwrites only the
+3-byte `cmove` with an equivalent result).
+
+- Applier: `autopatch60-oneshot.elf`, which waits for RDR2's eboot, **detects
+  the running version** (64-byte context gate per row — memory decides, not
+  labels), **verifies the original bytes**, writes the patch, re-verifies,
+  notifies (`RDR2 60fps ON v01.xx - By KurohaXR`) and **exits**. Nothing
+  resident, no traffic after patching. If anything doesn't match, it writes
+  nothing.
 - One subtlety found through testing: the write has to land within the first
   seconds of the process's life (the game selects its video mode once at boot).
   The one-shot handles that by itself: it waits for the spawn and writes within
@@ -97,16 +110,19 @@ Don't install the mod. Play on the **clean** update and unlock the framerate liv
 - Jailbroken PS5 with `elfldr` (port 9021).
 - [`ps5debug-NG`](https://github.com/OpenSourcereR-dev/ps5debug-NG) v1.3.0
   (server on port 744; the autopatcher is its client on `127.0.0.1`).
-- RDR2 (PS4) `CUSA03041` **clean v1.32** installed (base + unmodded update).
+- RDR2 (PS4) `CUSA03041` clean install: **1.00** (base), **1.29** or **1.32**
+  (base + unmodded update).
 - A Payload Manager with autoload (recommended) or manual loading of 2 ELFs.
 
-## Daily use (no PC)
+## How to Use
 
 1. After jailbreaking, load `ps5debug-NG.elf` (once, autoload-friendly) and then
    `autopatch60-oneshot.elf` manually once per play session (Payload Manager).
+   On load you get a `RDR2: waiting for game` notification (if `ps5debug-NG` is
+   missing you get `ps5debug-NG not found or not running` instead).
 2. Launch RDR2 whenever convenient (no time pressure: it waits up to 10 minutes,
    then exits quietly if no game appears).
-3. The `RDR2 60fps ON - made by KurohaXR` notification appears — play at 60fps.
+3. The `RDR2 60fps ON v01.xx - By KurohaXR` notification appears — play at 60fps.
 4. When finished, close the game normally. Nothing remains (the patcher already
    exited; the patch lived only in the dead game's RAM).
 
@@ -119,12 +135,14 @@ ships one-shot only.
 
 > ⚠️ Don't run `klogsrv` at the same time as `ps5debug-NG` (both listen on port 3232).
 
-## Test results (real hardware, PS5 FAT FW 12.00, clean CUSA03041 1.32)
+## Test results (PS5 FAT FW 12.00, real hardware)
 
-- **One-shot: 5/5 cold boots at 60fps**, playing across map areas and saving in
-  different spots. A save-position dependence theory was proposed and did not
-  hold up. Relaunching without loading the patcher gives 30fps, as expected —
-  nothing persists.
+- **v1.32 (clean update): 5/5 cold boots at 60fps**, playing across map areas
+  and saving in different spots. A save-position dependence theory was proposed
+  and did not hold up. Relaunching without loading the patcher gives 30fps, as
+  expected — nothing persists.
+- **v1.00 (base) and v1.29 (update) validated in-game** with the one-shot:
+  version-tagged notification (`v01.00` / `v01.29`) and 60fps confirmed.
 - Closing the game (Home → Options → Close) is clean with one-shot across all trials.
 - With the **resident** daemon, one kernel trap (`Fatal trap 12: page fault in
   kernel mode`) was captured exactly at game close. Correlation, not proof — but
@@ -165,6 +183,8 @@ it (nothing persists).
 - Made by **KurohaXR**.
 - 1.32 *Unlock FPS* patch: **Jao**; patch repo
   [`illusionyy/PS-Game-Patch`](https://github.com/illusionyy/PS-Game-Patch) (**illusion**).
+  The 1.00 / 1.29 rows use the same site, verified against those versions' real
+  eboots (1.29 cross-checked against illusion's published address).
 - [`ps5debug-NG`](https://github.com/OpenSourcereR-dev/ps5debug-NG) (**OpenSourcereR** et al.)
   + [`ps5-payload-sdk`](https://github.com/ps5-payload-dev/sdk),
   [`elfldr`](https://github.com/ps5-payload-dev/elfldr),

@@ -21,19 +21,57 @@
 #define CMD_CONSOLE_NOTIFY 0xBDDD0004u
 #define CMD_FG_APP         0xBDDD0006u
 
-#define JAO_RVA   0x5453029u            /* 0x05853029 - 0x400000 */
 #define PROT_EXEC 0x4u
 #define IMG_BASE_DEFAULT 0x400000u     /* base seen 100% of the time; fast-path only */
+#define CTX_OFF 32
 
-/* 64-byte context of the clean 1.32 eboot around the target (target at +32).
- * Verified against the mounted patch0 copy and against live disassembly. */
-static const uint8_t JAO_CTX[64] = {
+/* patch-site table: one row per verified game version. Memory decides which
+ * row applies (64-byte context gate); app_ver is only used for logging.
+ * orig: cmove esi,eax ; patch: xor esi,esi ; nop  (forces first display mode) */
+struct patch_row {
+    uint32_t rva;               /* target RVA (XML Address - 0x400000) */
+    uint8_t plen;               /* patch length in bytes */
+    const uint8_t *orig;
+    const uint8_t *patch;
+    const uint8_t *ctx;         /* 64 B, target at +32 */
+    const char *ver;
+};
+
+static const uint8_t ORIG3[3] = {0x0f, 0x44, 0xf0}; /* cmove esi,eax */
+static const uint8_t NEW3[3]  = {0x31, 0xf6, 0x90}; /* xor esi,esi;nop */
+
+/* v1.00 context (scene base pkg; unique anchor match; disasm verified) */
+static const uint8_t CTX_100[64] = {
+    0xff,0x0f,0x82,0xea,0xfd,0xff,0xff,0x4c,0x8b,0xb5,0x78,0xfe,0xff,0xff,0x8b,0x3d,
+    0x25,0xca,0xa8,0x03,0x41,0x8b,0x86,0xb8,0x00,0x00,0x00,0x8d,0x70,0xff,0x85,0xc0,
+    0x0f,0x44,0xf0,0xe8,0xc9,0x55,0x3e,0x01,0x85,0xc0,0x0f,0x88,0x30,0x0a,0x00,0x00,
+    0x45,0x8b,0x86,0x94,0x00,0x00,0x00,0x45,0x8b,0x8e,0x98,0x00,0x00,0x00,0x48,0x8d
+};
+
+/* v1.29 context (update installed on console; unique anchor match; same cmove).
+ * illusion's public address 0x0578AB57 points at the `test eax,eax` before the
+ * cmove (5-byte overwrite of test+cmove); we patch the 3-byte cmove only. */
+static const uint8_t CTX_129[64] = {
+    0x89,0x04,0xe9,0x49,0xff,0xc5,0x4d,0x39,0xf5,0x0f,0x82,0xe8,0xfd,0xff,0xff,0x8b,
+    0x05,0x02,0x9e,0xc6,0x03,0x8b,0x3d,0x0c,0xa8,0xc7,0x03,0x8d,0x70,0xff,0x85,0xc0,
+    0x0f,0x44,0xf0,0xe8,0x1f,0xd6,0x62,0x01,0x85,0xc0,0x0f,0x88,0xac,0x10,0x00,0x00,
+    0x44,0x8b,0x05,0xb8,0x9d,0xc6,0x03,0x44,0x8b,0x0d,0xb5,0x9d,0xc6,0x03,0x48,0x8d
+};
+
+/* v1.32 context (Jao; verified against running clean 1.32) */
+static const uint8_t CTX_132[64] = {
     0x89,0x04,0xe9,0x49,0xff,0xc5,0x4d,0x39,0xf5,0x0f,0x82,0xe8,0xfd,0xff,0xff,0x8b,
     0x05,0xb2,0xcf,0xd5,0x03,0x8b,0x3d,0xcc,0xd9,0xd6,0x03,0x8d,0x70,0xff,0x85,0xc0,
     0x0f,0x44,0xf0,0xe8,0x2f,0xad,0x70,0x01,0x85,0xc0,0x0f,0x88,0xac,0x10,0x00,0x00,
     0x44,0x8b,0x05,0x68,0xcf,0xd5,0x03,0x44,0x8b,0x0d,0x65,0xcf,0xd5,0x03,0x48,0x8d
 };
-#define JAO_CTX_OFF 32
+
+#define NROWS 3
+static const struct patch_row ROWS[NROWS] = {
+    { 0x468EE1Fu, 3, ORIG3, NEW3, CTX_100, "01.00" },
+    { 0x538AB59u, 3, ORIG3, NEW3, CTX_129, "01.29" },
+    { 0x5453029u, 3, ORIG3, NEW3, CTX_132, "01.32" },
+};
 
 /* USB telemetry (read back later over FTP). Nothing sensitive. */
 #define LOG_PATH "/mnt/usb0/autopatch60.log"
@@ -46,9 +84,6 @@ static void tlog(const char *msg) {
     fprintf(f, "%u %s\n", log_n++, msg);
     fclose(f);
 }
-
-static const uint8_t JAO_ORIG[3] = {0x0f, 0x44, 0xf0}; /* cmove esi,eax */
-static const uint8_t JAO_NEW[3]  = {0x31, 0xf6, 0x90}; /* xor esi,esi;nop */
 
 static const char WANT_TITLEID[] = "CUSA03041";
 
@@ -157,8 +192,8 @@ static int notify(const char *msg) {
     return rc;
 }
 
-/* foreground app: pid + titleid. pid==0 when no game is in front. */
-static int fg_app(uint32_t *pid, char titleid[16]) {
+/* foreground app: pid + titleid + app_ver (param.sfo, offset 124 of response) */
+static int fg_app(uint32_t *pid, char titleid[16], char appver[16]) {
     uint8_t resp[140];
     if (cmd(CMD_FG_APP, NULL, 0))
         return -1;
@@ -169,6 +204,8 @@ static int fg_app(uint32_t *pid, char titleid[16]) {
     *pid = get32le(resp);
     memcpy(titleid, resp + 4, 16);
     titleid[15] = 0;
+    memcpy(appver, resp + 124, 16);
+    appver[15] = 0;
     return 0;
 }
 
@@ -243,14 +280,58 @@ static int eboot_base(uint32_t pid, uint64_t *base) {
     return 0;
 }
 
-/* one-shot flow: fast-path 64-byte context check, MAPS fallback on mismatch.
- * Fast-path reads 64 B at fast_base+RVA-32; an exact JAO_CTX match makes the
- * target safe without downloading MAPS (spawn->write ~1 s). Poll every 0.5 s. */
-#define AGGRESSIVE_CYCLES 360
+/* Try every table row at the given image base. Returns:
+ * 1 = patched (or already patched) and notified; 2 = unexpected bytes (notified);
+ * 3 = write failed (transient); 0 = no row's context matched. */
+static int try_rows(uint32_t pid, uint64_t base) {
+    char lb[160];
+    int i;
+    for (i = 0; i < NROWS; i++) {
+        const struct patch_row *r = &ROWS[i];
+        uint64_t target = base + r->rva;
+        uint8_t ctx[64], cur[8];
+        if (proc_read(pid, target - CTX_OFF, ctx, 64))
+            continue;
+        if (memcmp(ctx, r->ctx, 64) != 0)
+            continue;
+        memcpy(cur, ctx + CTX_OFF, 8);
+        snprintf(lb, sizeof(lb), "ROW %s hit pid=%u", r->ver, pid);
+        tlog(lb);
+        if (!memcmp(cur, r->patch, r->plen)) {
+            tlog("ALREADY");
+            snprintf(lb, sizeof(lb), "RDR2 60fps ON v%s - By KurohaXR", r->ver);
+            notify(lb);
+            return 1;
+        }
+        if (memcmp(cur, r->orig, r->plen) != 0) {
+            snprintf(lb, sizeof(lb), "ABORT_UNEXP %02x%02x%02x ver=%s",
+                     cur[0], cur[1], cur[2], r->ver);
+            tlog(lb);
+            snprintf(lb, sizeof(lb), "RDR2: unexpected eboot v%s, not applied - By KurohaXR",
+                     r->ver);
+            notify(lb);
+            return 2;
+        }
+        tlog("WRITE_TRY");
+        if (proc_write(pid, target, r->patch, r->plen) ||
+            proc_read(pid, target, cur, r->plen) ||
+            memcmp(cur, r->patch, r->plen) != 0) {
+            tlog("WRITE_FAIL");
+            return 3;
+        }
+        tlog("WRITE_OK");
+        snprintf(lb, sizeof(lb), "RDR2 60fps ON v%s - By KurohaXR", r->ver);
+        notify(lb);
+        return 1;
+    }
+    return 0;
+}
+
+/* one-shot flow: multi-version table with a 64-byte context gate per row.
+ * Fast-path at the default image base (0x400000), MAPS fallback once.
+ * Poll every 0.5 s while waiting for the game; exits after patching. */
 #define POLL_FAST_USEC 500000u
-#define POLL_SPARSE_SEC 15u
-#define MAX_NOTIFIES_PER_PID 3u
-#define AUTOPATCH_VERSION "oneshot-1.1"
+#define AUTOPATCH_VERSION "oneshot-1.2"
 
 int main(void) {
     /* Wait (max. 10 min) for RDR2 to boot, patch once verified and EXIT.
@@ -258,23 +339,24 @@ int main(void) {
      * If the game never shows up, exit quietly. */
     uint32_t pid = 0;
     char titleid[16] = {0};
-    uint64_t base = 0, target = 0;
-    uint8_t ctx[64], cur[3];
-    int have_target = 0;
+    char appver[16] = {0};
+    uint64_t base = 0;
     unsigned waited = 0;
-    char lb[128];
+    char lb[160];
     const unsigned LIMIT = 1200; /* 1200 x 0.5 s = 10 min */
 
     printf("autopatch60 v%s (one-shot): waiting for game...\n", AUTOPATCH_VERSION);
-    tlog("BOOT oneshot");
+    tlog("BOOT oneshot " AUTOPATCH_VERSION);
     if (g_sock < 0 && connect_dbg()) {
         tlog("CONN_FAIL0");
+        notify("ps5debug-NG not found or not running");
         return 2;
     }
     tlog("CONN_OK");
+    notify("RDR2: waiting for game");
     /* 1) wait for spawn */
     for (waited = 0; waited < LIMIT; waited++) {
-        if (fg_app(&pid, titleid))
+        if (fg_app(&pid, titleid, appver))
             break; /* dead connection: exit, nothing to patch */
         if (pid && !strcmp(titleid, WANT_TITLEID))
             break;
@@ -284,52 +366,20 @@ int main(void) {
         tlog("TIMEOUT_NO_GAME");
         return 0; /* quiet exit: nothing was ever launched */
     }
-    snprintf(lb, sizeof(lb), "SPAWN pid=%u", pid);
+    snprintf(lb, sizeof(lb), "SPAWN pid=%u app_ver=%s", pid, appver);
     tlog(lb);
-    /* 2) resolve target: CTX fast-path, MAPS fallback */
-    target = IMG_BASE_DEFAULT + JAO_RVA;
-    if (!proc_read(pid, target - JAO_CTX_OFF, ctx, 64) &&
-        !memcmp(ctx, JAO_CTX, 64)) {
-        have_target = 1;
-    } else if (!eboot_base(pid, &base)) {
-        target = base + JAO_RVA;
+    /* 2) fast-path rows at the default image base */
+    if (try_rows(pid, IMG_BASE_DEFAULT) == 1)
+        return 0;
+    /* 3) MAPS fallback: re-resolve base and retry once */
+    if (!eboot_base(pid, &base)) {
         snprintf(lb, sizeof(lb), "BASE 0x%llx pid=%u",
                  (unsigned long long)base, pid);
         tlog(lb);
-        if (!proc_read(pid, target - JAO_CTX_OFF, ctx, 64) &&
-            !memcmp(ctx, JAO_CTX, 64)) {
-            have_target = 1;
-        }
+        if (try_rows(pid, base) == 1)
+            return 0;
     }
-    if (!have_target) {
-        tlog("NO_TARGET");
-        notify("RDR2 60fps: target not found, not applied");
-        return 3;
-    }
-    /* 3) verify -> write -> re-verify -> notify -> exit */
-    memcpy(cur, ctx + JAO_CTX_OFF, 3);
-    if (!memcmp(cur, JAO_NEW, 3)) {
-        tlog("ALREADY");
-        notify("RDR2 60fps ON - made by KurohaXR");
-        return 0;
-    }
-    if (memcmp(cur, JAO_ORIG, 3) != 0) {
-        snprintf(lb, sizeof(lb), "ABORT_UNEXP %02x%02x%02x pid=%u",
-                 cur[0], cur[1], cur[2], pid);
-        tlog(lb);
-        notify("RDR2 60fps: unexpected eboot, not applied");
-        return 4;
-    }
-    tlog("WRITE_TRY");
-    if (proc_write(pid, target, JAO_NEW, 3) ||
-        proc_read(pid, target, cur, 3) ||
-        memcmp(cur, JAO_NEW, 3) != 0) {
-        tlog("WRITE_FAIL");
-        notify("RDR2 60fps: write failed, not applied");
-        return 5;
-    }
-    tlog("WRITE_OK");
-    notify("RDR2 60fps ON - made by KurohaXR");
-    printf("autopatch60: applied and verified, exiting.\n");
-    return 0;
+    tlog("NO_TARGET");
+    notify("RDR2: game version not supported - By KurohaXR");
+    return 3;
 }
